@@ -523,9 +523,9 @@
     <div id="lockScreen" class="lock-form">
       <div class="flower-mini" id="lockLogo"></div>
       <h2>Masuk Panel Admin</h2>
-      <p class="sub-txt">Masukkan password untuk mengelola data obat.</p>
+      <p class="sub-txt">Masukkan password admin untuk mengelola data obat.</p>
       <div class="field">
-        <input type="password" id="adminPasswordInput" placeholder="Password" autocomplete="off">
+        <input type="password" id="adminPasswordInput" placeholder="Password admin" autocomplete="off">
       </div>
       <div class="error-msg" id="lockError"></div>
       <button class="btn btn-primary" id="unlockBtn" style="width:100%;">Masuk</button>
@@ -558,7 +558,7 @@
       </div>
 
       <h2 id="formTitle" style="margin-top:22px;">Tambah Obat Baru</h2>
-      <p class="sub-txt">Data tersimpan otomatis di perangkat ini.</p>
+      <p class="sub-txt">Data tersimpan otomatis ke server dan bisa dilihat dari perangkat mana pun.</p>
 
       <form id="obatForm">
         <input type="hidden" id="editId">
@@ -635,20 +635,63 @@
 
       <div class="admin-list" id="adminList"></div>
 
-      <div class="btn-row" style="margin-top:22px;border-top:1.5px solid #F0E4D2;padding-top:16px;">
-        <button class="btn btn-ghost" id="changePasswordBtn">Ganti password</button>
+      <div class="btn-row" style="margin-top:22px;border-top:1.5px solid #F0E4D2;padding-top:16px;flex-direction:column;align-items:flex-start;gap:8px;">
+        <p class="sub-txt" style="margin:0;">Untuk ganti password admin, buka Firebase Console &gt; Authentication &gt; Users.</p>
         <button class="btn btn-ghost" id="lockAgainBtn">Kunci panel</button>
       </div>
     </div>
   </div>
 </div>
 
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
+  import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+
+  // ============================================================
+  // GANTI 6 nilai di bawah ini dengan config dari Firebase Console-mu:
+  // Project settings (ikon gerigi) > General > scroll ke "Your apps" > SDK setup and configuration
+  // ============================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyBZZNFdkwS2I_0BeFVlP9F20bSugAsabbA",
+    authDomain: "medicine-kit-dearrona.firebaseapp.com",
+    projectId: "medicine-kit-dearrona",
+    storageBucket: "medicine-kit-dearrona.firebasestorage.app",
+    messagingSenderId: "1032168892053",
+    appId: "1:1032168892053:web:e962ed4b960108a7ba5d9c"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // Diekspos ke script utama (classic script) lewat window, karena script
+  // utama masih pakai fungsi global biasa (bukan module).
+  window.fb = { auth, db, signInWithEmailAndPassword, signOut, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch };
+
+  (async () => {
+    try {
+      const settingsSnap = await getDoc(doc(db, "katalog", "settings"));
+      const settings = settingsSnap.exists() ? settingsSnap.data() : null;
+      const obatSnaps = await getDocs(collection(db, "obat"));
+      const items = [];
+      obatSnaps.forEach(d => items.push(d.data()));
+      window.onRemoteReady(settings, items.length > 0 ? items : null);
+    } catch (err) {
+      console.error("Gagal memuat data dari server:", err);
+      window.onRemoteReady(null, null);
+    }
+  })();
+</script>
 <script>
 (function(){
   "use strict";
 
+  // GANTI sesuai email akun admin yang kamu buat di
+  // Firebase Console > Authentication > Users
+  var ADMIN_EMAIL = "admin@dearrona-obat.app";
+
   var STORAGE_KEY = "dearrona_obat_v1";
-  var PASS_KEY = "dearrona_admin_pass_v1";
   var KIT_KEY = "dearrona_kits_v1";
   var LOGO_KEY = "dearrona_logo_v1";
   var DEFAULT_LOGO_SVG = '<svg viewBox="0 0 420 420" xmlns="http://www.w3.org/2000/svg"><g>'+
@@ -671,6 +714,7 @@
       if(dataUrl) localStorage.setItem(LOGO_KEY, dataUrl);
       else localStorage.removeItem(LOGO_KEY);
     }catch(e){}
+    syncSettingsToCloud();
   }
   var BANNER_KEY = "dearrona_banners_v1";
   var DEFAULT_BANNERS = [
@@ -687,6 +731,7 @@
   }
   function saveBanners(arr){
     try{ localStorage.setItem(BANNER_KEY, JSON.stringify(arr)); }catch(e){}
+    syncSettingsToCloud();
   }
 
   function renderLogos(){
@@ -697,7 +742,6 @@
     if(headerLogo) headerLogo.innerHTML = markup;
     if(lockLogo) lockLogo.innerHTML = markup;
   }
-  var DEFAULT_PASSWORD = "dearrona2026";
   var DEFAULT_KITS = ["Paket Kit A", "Paket Kit B", "Paket Kit C", "Paket Kit D"];
   var KIT_PALETTE = ["#D2703C", "#8FA35E", "#C98A3E", "#B48EA6", "#6E8FB0", "#C2694F"];
 
@@ -773,9 +817,7 @@
   }
   function saveData(d){
     localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
-  }
-  function getPassword(){
-    return localStorage.getItem(PASS_KEY) || DEFAULT_PASSWORD;
+    syncObatToCloud();
   }
 
   function loadKits(){
@@ -788,7 +830,55 @@
   }
   function saveKits(k){
     localStorage.setItem(KIT_KEY, JSON.stringify(k));
+    syncSettingsToCloud();
   }
+
+  // ---------- Sinkronisasi ke Firestore (dipanggil oleh fungsi save di atas) ----------
+  function syncSettingsToCloud(){
+    if(!window.fb) return;
+    var fb = window.fb;
+    fb.setDoc(fb.doc(fb.db, "katalog", "settings"), { kits: kits, logo: loadLogo(), banners: banners })
+      .catch(function(err){ console.error("Gagal simpan pengaturan ke server:", err); });
+  }
+  function syncObatToCloud(){
+    if(!window.fb) return;
+    var fb = window.fb;
+    var batch = fb.writeBatch(fb.db);
+    data.forEach(function(o){
+      batch.set(fb.doc(fb.collection(fb.db, "obat"), String(o.id)), o);
+    });
+    batch.commit().catch(function(err){ console.error("Gagal simpan data obat ke server:", err); });
+  }
+  function deleteObatFromCloud(id){
+    if(!window.fb) return;
+    var fb = window.fb;
+    fb.deleteDoc(fb.doc(fb.db, "obat", String(id))).catch(function(err){ console.error("Gagal hapus obat di server:", err); });
+  }
+
+  // Dipanggil oleh script module Firebase setelah data dari Firestore datang.
+  window.onRemoteReady = function(settings, remoteItems){
+    if(settings){
+      if(settings.kits && settings.kits.length){ kits = settings.kits; localStorage.setItem(KIT_KEY, JSON.stringify(kits)); }
+      if(typeof settings.logo === "string"){
+        if(settings.logo) localStorage.setItem(LOGO_KEY, settings.logo);
+        else localStorage.removeItem(LOGO_KEY);
+      }
+      if(settings.banners && settings.banners.length){ banners = settings.banners; localStorage.setItem(BANNER_KEY, JSON.stringify(banners)); }
+    }
+    if(remoteItems){
+      data = remoteItems;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    }
+    renderLogos();
+    renderBannerSlider();
+    startBannerAutoplay();
+    renderCategoryGrid();
+    renderKitTabs();
+    renderGrid();
+    if(typeof isUnlocked !== "undefined" && isUnlocked){
+      populateKitSelect(); renderAdminList(); renderKitManager(); renderDashboardStats(); refreshLogoPreview(); renderBannerManager();
+    }
+  };
 
   var data = loadData();
   var kits = loadKits();
@@ -1176,25 +1266,31 @@
   });
   function tryUnlock(){
     var val = document.getElementById("adminPasswordInput").value;
-    if(val === getPassword()){
-      isUnlocked = true;
-      showAdminContent();
-    } else {
-      document.getElementById("lockError").textContent = "Password salah, coba lagi.";
+    if(!window.fb){
+      document.getElementById("lockError").textContent = "Masih menyambung ke server, coba lagi sebentar.";
+      return;
     }
+    var btn = document.getElementById("unlockBtn");
+    btn.disabled = true;
+    var originalLabel = btn.textContent;
+    btn.textContent = "Memeriksa...";
+    window.fb.signInWithEmailAndPassword(window.fb.auth, ADMIN_EMAIL, val)
+      .then(function(){
+        isUnlocked = true;
+        showAdminContent();
+      })
+      .catch(function(){
+        document.getElementById("lockError").textContent = "Password salah, coba lagi.";
+      })
+      .finally(function(){
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      });
   }
   document.getElementById("lockAgainBtn").addEventListener("click", function(){
     isUnlocked = false;
+    if(window.fb) window.fb.signOut(window.fb.auth);
     showLockScreen();
-  });
-  document.getElementById("changePasswordBtn").addEventListener("click", function(){
-    var current = prompt("Masukkan password saat ini:");
-    if(current === null) return;
-    if(current !== getPassword()){ alert("Password saat ini salah."); return; }
-    var next = prompt("Masukkan password baru:");
-    if(!next) return;
-    localStorage.setItem(PASS_KEY, next);
-    alert("Password berhasil diganti.");
   });
 
   // ---------- Admin form (CRUD) ----------
@@ -1202,17 +1298,39 @@
   var editId = document.getElementById("editId");
   var photoDataUrl = "";
 
+  // Mengecilkan ukuran foto sebelum disimpan (penting karena tiap dokumen
+  // Firestore dibatasi 1MB, dan biar tidak berat dibuka di tablet).
+  function compressImageFile(file, maxDim, quality, cb){
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      var img = new Image();
+      img.onload = function(){
+        var w = img.width, h = img.height;
+        if(w > maxDim || h > maxDim){
+          if(w > h){ h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        cb(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = function(){ cb(ev.target.result); };
+      img.src = ev.target.result;
+    };
+    reader.onerror = function(){ cb(""); };
+    reader.readAsDataURL(file);
+  }
+
   var pendingLogoDataUrl = "";
   document.getElementById("f_logo_upload").addEventListener("change", function(e){
     var file = e.target.files[0];
     if(!file) return;
-    var reader = new FileReader();
-    reader.onload = function(ev){
-      pendingLogoDataUrl = ev.target.result;
+    compressImageFile(file, 500, 0.85, function(dataUrl){
+      pendingLogoDataUrl = dataUrl;
       document.getElementById("logoPreview").style.display = "block";
       document.getElementById("logoPreviewImg").src = pendingLogoDataUrl;
-    };
-    reader.readAsDataURL(file);
+    });
   });
   document.getElementById("saveLogoBtn").addEventListener("click", function(){
     if(!pendingLogoDataUrl){
@@ -1238,9 +1356,7 @@
   document.getElementById("f_banner_upload").addEventListener("change", function(e){
     var file = e.target.files[0];
     if(!file) return;
-    var reader = new FileReader();
-    reader.onload = function(ev){ pendingBannerDataUrl = ev.target.result; };
-    reader.readAsDataURL(file);
+    compressImageFile(file, 1200, 0.8, function(dataUrl){ pendingBannerDataUrl = dataUrl; });
   });
   document.getElementById("addBannerBtn").addEventListener("click", function(){
     var title = document.getElementById("f_banner_title").value.trim();
@@ -1263,13 +1379,11 @@
   document.getElementById("f_foto").addEventListener("change", function(e){
     var file = e.target.files[0];
     if(!file) return;
-    var reader = new FileReader();
-    reader.onload = function(ev){
-      photoDataUrl = ev.target.result;
+    compressImageFile(file, 700, 0.8, function(dataUrl){
+      photoDataUrl = dataUrl;
       document.getElementById("photoPreview").style.display = "block";
       document.getElementById("photoPreviewImg").src = photoDataUrl;
-    };
-    reader.readAsDataURL(file);
+    });
   });
 
   function resetForm(){
@@ -1384,6 +1498,7 @@
     if(!confirm('Hapus "'+o.nama+'" dari katalog?')) return;
     data = data.filter(function(x){ return x.id !== id; });
     saveData(data);
+    deleteObatFromCloud(id);
     renderGrid();
     renderAdminList();
     renderDashboardStats();
